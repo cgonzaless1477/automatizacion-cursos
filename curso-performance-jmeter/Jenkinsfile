@@ -5,7 +5,7 @@ pipeline {
         // Ruta donde está instalado JMeter en el servidor
         JMETER_HOME       = 'C:/apache-jmeter-5.6.3'
         // Ruta al plan de pruebas, relativa a la carpeta curso-performance-jmeter
-        JMETER_TEST_PLAN  = 'tests/escenario-principal.jmx'
+        JMETER_TEST_PLAN  = 'test/escenario-principal.jmx'
         // Carpeta donde guardaremos los resultados
         JMETER_RESULTS_DIR = 'target/jmeter'
     }
