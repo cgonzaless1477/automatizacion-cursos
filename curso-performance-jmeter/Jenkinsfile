@@ -33,13 +33,19 @@ pipeline {
         }
     }
 
-    post {
-        always {
-            dir('curso-performance-jmeter') {
-                archiveArtifacts artifacts: 'target/jmeter/**/*',
-                                 fingerprint: true,
-                                 allowEmptyArchive: true
-            }
-        }
-    }
+	   post {
+		always {
+			dir('curso-performance-jmeter') {
+				// 1) Seguir guardando los artefactos (como ya lo haces)
+				archiveArtifacts artifacts: 'target/jmeter/**/*',
+								 fingerprint: true,
+								 allowEmptyArchive: true
+
+				// 2) Publicar reporte de performance a partir del .jtl
+				perfReport errorFailedThreshold: 0,
+						   errorUnstableThreshold: 0,
+						   sourceDataFiles: 'target/jmeter/resultados.jtl'
+			}
+		}
+	}
 }
