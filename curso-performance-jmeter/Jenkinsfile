@@ -32,7 +32,7 @@ pipeline {
 
         stage('Ejecutar pruebas de performance') {
             steps {
-                dir('curso-performance-jmeter') {
+                dir('tests/escenario-principal.jmx') {
                     // Crear carpeta de resultados si no existe
                     bat 'if not exist %JMETER_RESULTS_DIR% mkdir %JMETER_RESULTS_DIR%'
 
