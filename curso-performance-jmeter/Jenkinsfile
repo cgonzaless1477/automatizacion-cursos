@@ -4,7 +4,7 @@ pipeline {
     // 🔧 Variables de entorno (ajusta la ruta de JMeter)
     environment {
         // Ruta donde instalaste JMeter en tu máquina/Jenkins
-        JMETER_HOME = 'C:\apache-jmeter-5.6.3'
+        JMETER_HOME = 'C:\\apache-jmeter-5.6.3'
 
         // Ruta del plan de pruebas JMeter dentro del repo
         JMETER_TEST_PLAN = 'curso-performance-jmeter\\tests\\escenario-principal.jmx'
