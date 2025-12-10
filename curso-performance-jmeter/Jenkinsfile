@@ -16,7 +16,7 @@ pipeline {
                 dir('curso-performance-jmeter') {
                     bat '''
                         echo ===== Verificando JMeter =====
-                        "%JMETER_HOME%/bin/jmeter.bat" -v
+                        "C:/apache-jmeter-5.6.3/bin/jmeter.bat" -v
                     '''
                 }
             }
@@ -32,6 +32,9 @@ pipeline {
                         REM Borrar reporte anterior si existe
                         if exist \"%JMETER_RESULTS_DIR%\\report\" rmdir /s /q \"%JMETER_RESULTS_DIR%\\report\"
 
+                        REM Borrar archivo de resultados anterior si existe
+                        if exist \"%JMETER_RESULTS_DIR%\\resultados.jtl\" del /q \"%JMETER_RESULTS_DIR%\\resultados.jtl\"
+
                         REM Crear carpeta base de resultados si no existe
                         if not exist \"%JMETER_RESULTS_DIR%\" mkdir \"%JMETER_RESULTS_DIR%\"
 
@@ -40,6 +43,9 @@ pipeline {
                           -t \"%JMETER_TEST_PLAN%\" ^
                           -l \"%JMETER_RESULTS_DIR%/resultados.jtl\" ^
                           -e -o \"%JMETER_RESULTS_DIR%/report\"
+
+                        echo ===== Código de salida JMeter: %ERRORLEVEL% =====
+                        exit /B %ERRORLEVEL%
                     """
                 }
             }
@@ -56,8 +62,8 @@ pipeline {
 
                 // Publicar reporte de performance a partir del .jtl
                 perfReport(
-                    errorFailedThreshold: 10,       // FAIL si errores >= 10%
-                    errorUnstableThreshold: 1,      // UNSTABLE si errores >= 1%
+                    errorFailedThreshold: 10,      // FAIL si errores >= 10%
+                    errorUnstableThreshold: 1,     // UNSTABLE si errores >= 1%
                     sourceDataFiles: 'target/jmeter/resultados.jtl'
                 )
             }
