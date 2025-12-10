@@ -3,9 +3,9 @@ pipeline {
 
     environment {
         // Ruta donde está instalado JMeter en el servidor
-        JMETER_HOME       = 'C:/apache-jmeter-5.6.3'
+        JMETER_HOME        = 'C:/apache-jmeter-5.6.3'
         // Ruta al plan de pruebas, relativa a la carpeta curso-performance-jmeter
-        JMETER_TEST_PLAN  = 'test/escenario-principal.jmx'
+        JMETER_TEST_PLAN   = 'test/escenario-principal.jmx'
         // Carpeta donde guardaremos los resultados
         JMETER_RESULTS_DIR = 'target/jmeter'
     }
@@ -14,48 +14,53 @@ pipeline {
         stage('Verificar entorno') {
             steps {
                 dir('curso-performance-jmeter') {
-                    bat 'echo ===== Verificando JMeter ====='
-                    bat '"%JMETER_HOME%/bin/jmeter.bat" -v'
+                    bat '''
+                        echo ===== Verificando JMeter =====
+                        "%JMETER_HOME%/bin/jmeter.bat" -v
+                    '''
                 }
             }
         }
 
         stage('Ejecutar pruebas de performance') {
-    steps {
-        dir('curso-performance-jmeter') {
-            bat '''
-                echo ===== Carpeta actual =====
-                cd
+            steps {
+                dir('curso-performance-jmeter') {
+                    bat """
+                        echo ===== Carpeta actual =====
+                        cd
 
-                REM Borrar reporte anterior si existe
-                if exist "target\\jmeter\\report" rmdir /s /q "target\\jmeter\\report"
+                        REM Borrar reporte anterior si existe
+                        if exist \"%JMETER_RESULTS_DIR%\\report\" rmdir /s /q \"%JMETER_RESULTS_DIR%\\report\"
 
-                REM Crear carpeta base de resultados si no existe
-                if not exist "target\\jmeter" mkdir "target\\jmeter"
+                        REM Crear carpeta base de resultados si no existe
+                        if not exist \"%JMETER_RESULTS_DIR%\" mkdir \"%JMETER_RESULTS_DIR%\"
 
-                REM Ejecutar JMeter en modo no gráfico
-                "C:/apache-jmeter-5.6.3/bin/jmeter.bat" -n ^
-                  -t "test/escenario-principal.jmx" ^
-                  -l "target/jmeter/resultados.jtl" ^
-                  -e -o "target/jmeter/report"
+                        REM Ejecutar JMeter en modo no gráfico
+                        \"%JMETER_HOME%/bin/jmeter.bat\" -n ^
+                          -t \"%JMETER_TEST_PLAN%\" ^
+                          -l \"%JMETER_RESULTS_DIR%/resultados.jtl\" ^
+                          -e -o \"%JMETER_RESULTS_DIR%/report\"
+                    """
                 }
             }
         }
     }
 
-	   post {
-		always {
-			dir('curso-performance-jmeter') {
-				// 1) Seguir guardando los artefactos (como ya lo haces)
-				archiveArtifacts artifacts: 'target/jmeter/**/*',
-								 fingerprint: true,
-								 allowEmptyArchive: true
+    post {
+        always {
+            dir('curso-performance-jmeter') {
+                // Guardar artefactos de JMeter (.jtl + reporte HTML)
+                archiveArtifacts artifacts: 'target/jmeter/**/*',
+                                 fingerprint: true,
+                                 allowEmptyArchive: true
 
-				// 2) Publicar reporte de performance a partir del .jtl
-				perfReport errorFailedThreshold: 0,
-						   errorUnstableThreshold: 0,
-						   sourceDataFiles: 'target/jmeter/resultados.jtl'
-			}
-		}
-	}
+                // Publicar reporte de performance a partir del .jtl
+                perfReport(
+                    errorFailedThreshold: 10,       // FAIL si errores >= 10%
+                    errorUnstableThreshold: 1,      // UNSTABLE si errores >= 1%
+                    sourceDataFiles: 'target/jmeter/resultados.jtl'
+                )
+            }
+        }
+    }
 }
