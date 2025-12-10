@@ -21,13 +21,23 @@ pipeline {
         }
 
         stage('Ejecutar pruebas de performance') {
-            steps {
-                dir('curso-performance-jmeter') {
-                    // Crear carpeta de resultados si no existe
-                    bat 'if not exist "%JMETER_RESULTS_DIR%" mkdir "%JMETER_RESULTS_DIR%"'
+    steps {
+        dir('curso-performance-jmeter') {
+            bat '''
+                echo ===== Carpeta actual =====
+                cd
 
-                    // Ejecutar JMeter en modo no gráfico
-                    bat "\"%JMETER_HOME%/bin/jmeter.bat\" -n -t \"%JMETER_TEST_PLAN%\" -l \"%JMETER_RESULTS_DIR%/resultados.jtl\" -e -o \"%JMETER_RESULTS_DIR%/report\""
+                REM Borrar reporte anterior si existe
+                if exist "target\\jmeter\\report" rmdir /s /q "target\\jmeter\\report"
+
+                REM Crear carpeta base de resultados si no existe
+                if not exist "target\\jmeter" mkdir "target\\jmeter"
+
+                REM Ejecutar JMeter en modo no gráfico
+                "C:/apache-jmeter-5.6.3/bin/jmeter.bat" -n ^
+                  -t "test/escenario-principal.jmx" ^
+                  -l "target/jmeter/resultados.jtl" ^
+                  -e -o "target/jmeter/report"
                 }
             }
         }
