@@ -1,350 +1,393 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+# scripts/generate_custom_report.py
 import argparse
+import os
 import json
 from datetime import datetime
-from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+)
 
-
-def to_native(obj):
-    """Convierte tipos numpy/pandas a tipos nativos para JSON (y evita int64/float64)."""
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    if isinstance(obj, (pd.Timestamp,)):
-        return obj.isoformat()
-    if isinstance(obj, dict):
-        return {str(k): to_native(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [to_native(x) for x in obj]
-    if obj is pd.NA:
-        return None
-    if isinstance(obj, np.ndarray):
-        return [to_native(x) for x in obj.tolist()]
-    return obj
+import matplotlib.pyplot as plt
 
 
-def fmt_ms(x):
-    return f"{float(x):,.0f} ms"
-
-
-def fmt_pct(x):
-    return f"{float(x) * 100:,.2f}%"
-
-
-def fmt_num(x):
-    return f"{float(x):,.2f}"
-
-
-def parse_jtl(jtl_path: Path) -> pd.DataFrame:
+def read_jtl(jtl_path: str) -> pd.DataFrame:
+    """
+    Lee JTL CSV típico de JMeter.
+    Columnas esperadas (pueden variar): timeStamp, elapsed, label, responseCode, success, bytes, sentBytes, Latency, Connect
+    """
     df = pd.read_csv(jtl_path)
-    # columnas típicas: timeStamp, elapsed, label, success, responseCode, responseMessage, ...
-    df["elapsed"] = pd.to_numeric(df["elapsed"], errors="coerce")
+
+    # Normaliza columnas comunes
+    colmap = {c.lower(): c for c in df.columns}
+    def pick(name, default=None):
+        return colmap.get(name.lower(), default)
+
+    # timestamps
+    ts_col = pick("timeStamp") or pick("timestamp") or pick("time")
+    if ts_col:
+        df["ts"] = pd.to_datetime(df[ts_col], unit="ms", errors="coerce")
+    else:
+        df["ts"] = pd.NaT
+
+    # elapsed
+    el_col = pick("elapsed")
+    if el_col:
+        df["elapsed"] = pd.to_numeric(df[el_col], errors="coerce")
+    else:
+        raise ValueError("No encuentro columna 'elapsed' en el JTL.")
+
+    # label
+    lab_col = pick("label")
+    df["label"] = df[lab_col] if lab_col else "ALL"
+
+    # success / responseCode
+    suc_col = pick("success")
+    df["success"] = df[suc_col].astype(str).str.lower().isin(["true", "1", "yes"]) if suc_col else True
+
+    rc_col = pick("responseCode")
+    df["responseCode"] = df[rc_col].astype(str) if rc_col else ""
+
+    # responseMessage (opcional)
+    rm_col = pick("responseMessage")
+    df["responseMessage"] = df[rm_col].astype(str) if rm_col else ""
+
+    # limpia
     df = df.dropna(subset=["elapsed"])
-    # success puede venir como True/False o "true"/"false"
-    if df["success"].dtype != bool:
-        df["success"] = df["success"].astype(str).str.lower().isin(["true", "1", "yes"])
     return df
 
 
-def compute_metrics(df: pd.DataFrame):
-    t0 = int(df["timeStamp"].min())
-    t1 = int(df["timeStamp"].max())
-    duration_s = max(1.0, (t1 - t0) / 1000.0)
+def pct(series: pd.Series, q: float) -> float:
+    if series.empty:
+        return float("nan")
+    return float(np.percentile(series.values, q))
 
-    total = int(len(df))
+
+def build_kpis(df: pd.DataFrame) -> dict:
+    start = df["ts"].min()
+    end = df["ts"].max()
+    duration_s = float((end - start).total_seconds()) if pd.notna(start) and pd.notna(end) else float("nan")
+
+    samples = int(len(df))
     errors = int((~df["success"]).sum())
-    successes = total - errors
-    error_rate = (errors / total) if total else 0.0
-    throughput_rps = (total / duration_s) if duration_s else 0.0
+    error_rate = (errors / samples * 100.0) if samples else 0.0
 
-    kpis = {
-        "samples": total,
-        "successes": successes,
+    avg = float(df["elapsed"].mean()) if samples else float("nan")
+    p90 = pct(df["elapsed"], 90)
+    p95 = pct(df["elapsed"], 95)
+    p99 = pct(df["elapsed"], 99)
+    mx = float(df["elapsed"].max()) if samples else float("nan")
+    mn = float(df["elapsed"].min()) if samples else float("nan")
+
+    throughput = (samples / duration_s) if duration_s and not np.isnan(duration_s) and duration_s > 0 else float("nan")
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "start": str(start) if pd.notna(start) else "",
+        "end": str(end) if pd.notna(end) else "",
+        "duration_s": duration_s,
+        "samples": samples,
         "errors": errors,
-        "error_rate": float(error_rate),
-        "throughput_rps": float(throughput_rps),
-        "avg_ms": float(df["elapsed"].mean()),
-        "min_ms": float(df["elapsed"].min()),
-        "p50_ms": float(df["elapsed"].quantile(0.50)),
-        "p90_ms": float(df["elapsed"].quantile(0.90)),
-        "p95_ms": float(df["elapsed"].quantile(0.95)),
-        "p99_ms": float(df["elapsed"].quantile(0.99)),
-        "max_ms": float(df["elapsed"].max()),
-        "duration_seconds": float(duration_s),
-        "start_timestamp_ms": t0,
-        "end_timestamp_ms": t1,
+        "error_rate": error_rate,
+        "throughput_rps": throughput,
+        "avg_ms": avg,
+        "p90_ms": p90,
+        "p95_ms": p95,
+        "p99_ms": p99,
+        "min_ms": mn,
+        "max_ms": mx,
     }
 
-    # por transacción
-    rows = []
-    for label, g in df.groupby("label", dropna=False):
-        g_total = int(len(g))
-        g_errors = int((~g["success"]).sum())
-        g_err = (g_errors / g_total) if g_total else 0.0
-        rows.append({
-            "label": str(label),
-            "samples": g_total,
-            "errors": g_errors,
-            "error_rate": float(g_err),
-            "avg_ms": float(g["elapsed"].mean()),
-            "p95_ms": float(g["elapsed"].quantile(0.95)),
-            "p99_ms": float(g["elapsed"].quantile(0.99)),
-            "min_ms": float(g["elapsed"].min()),
-            "max_ms": float(g["elapsed"].max()),
-        })
-    txn_df = pd.DataFrame(rows).sort_values(["p95_ms", "error_rate"], ascending=[False, False])
 
-    # top errores
-    top_errors = []
-    err_df = df[~df["success"]].copy()
-    if len(err_df) > 0:
-        sig_parts = []
-        # arma firma con lo que exista
-        for col in ["responseCode", "responseMessage", "failureMessage", "label"]:
-            if col in err_df.columns:
-                sig_parts.append(col)
+def top_slowest(df: pd.DataFrame, n=10) -> pd.DataFrame:
+    g = df.groupby("label").agg(
+        samples=("elapsed", "size"),
+        errors=("success", lambda s: int((~s).sum())),
+        p95=("elapsed", lambda s: np.percentile(s.values, 95) if len(s) else np.nan),
+        p99=("elapsed", lambda s: np.percentile(s.values, 99) if len(s) else np.nan),
+        avg=("elapsed", "mean")
+    ).reset_index()
 
-        def signature(r):
-            parts = []
-            for col in sig_parts:
-                v = r.get(col, "")
-                if pd.notna(v) and str(v).strip():
-                    parts.append(str(v))
-            return " | ".join(parts) if parts else "Error"
-
-        err_df["signature"] = err_df.apply(signature, axis=1)
-        vc = err_df["signature"].value_counts().head(10)
-        for sig, cnt in vc.items():
-            top_errors.append({
-                "signature": str(sig),
-                "count": int(cnt),
-                "pct": float(cnt / total) if total else 0.0
-            })
-
-    return kpis, txn_df, top_errors
+    g["error_rate"] = np.where(g["samples"] > 0, g["errors"] / g["samples"] * 100.0, 0.0)
+    g = g.sort_values(["p95", "p99"], ascending=False).head(n)
+    return g
 
 
-def build_custom_html(out_dir: Path, kpis: dict, txn_df: pd.DataFrame, top_errors: list):
-    top_slow = txn_df.head(10).to_dict(orient="records")
+def top_errors(df: pd.DataFrame, n=10) -> pd.DataFrame:
+    e = df.loc[~df["success"]].copy()
+    if e.empty:
+        return pd.DataFrame(columns=["label", "responseCode", "responseMessage", "count"])
+    g = e.groupby(["label", "responseCode", "responseMessage"]).size().reset_index(name="count")
+    return g.sort_values("count", ascending=False).head(n)
 
-    html_path = out_dir / "performance_report_custom.html"
 
-    html = f"""<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Reporte de Performance</title>
-<style>
-  :root{{ --ink:#0b1220; --muted: rgba(11,18,32,.72); --line: rgba(11,18,32,.10); --accent:#0b3cff; --bg:#f7f9fc; --card:#fff;}}
-  body{{font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; background:var(--bg); color:var(--ink);}}
-  .wrap{{max-width:1100px; margin:32px auto; padding:0 18px;}}
-  .hero{{background:linear-gradient(135deg, rgba(11,60,255,.10), rgba(11,18,32,.02)); border:1px solid var(--line); border-radius:18px; padding:22px;}}
-  .row{{display:grid; grid-template-columns: repeat(12, 1fr); gap:14px; margin-top:14px;}}
-  .card{{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; box-shadow: 0 6px 18px rgba(11,18,32,.06);}}
-  .kpi .v{{font-size:22px; font-weight:800;}}
-  .kpi .k{{font-size:12px; color:var(--muted); letter-spacing:.2px; margin-bottom:6px;}}
-  h1{{margin:0; font-size:22px;}} h2{{margin:0 0 8px; font-size:16px;}}
-  .sub{{color:var(--muted); font-size:13px; margin-top:6px;}}
-  table{{width:100%; border-collapse:collapse; font-size:13px;}}
-  th, td{{border-bottom:1px solid var(--line); padding:10px 8px; text-align:left;}}
-  th{{color:var(--muted); font-weight:700; font-size:12px; text-transform:uppercase; letter-spacing:.3px;}}
-  .mono{{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;}}
-  .grid-3{{grid-column: span 4;}} .grid-4{{grid-column: span 3;}} .grid-6{{grid-column: span 6;}} .grid-12{{grid-column: span 12;}}
-  @media (max-width: 900px){{ .grid-3,.grid-4,.grid-6{{grid-column: span 12;}} }}
-</style>
-</head>
-<body>
-<div class="wrap">
+def save_plot_timeline(df: pd.DataFrame, out_png: str):
+    if df["ts"].isna().all():
+        return False
 
-  <div class="hero">
-    <h1>Reporte de Pruebas de Performance</h1>
-    <div class="sub">
-      Generado: <b>{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</b> ·
-      Ventana: <span class="mono">{kpis["start_timestamp_ms"]}</span> → <span class="mono">{kpis["end_timestamp_ms"]}</span> ·
-      Duración: <b>{fmt_num(kpis["duration_seconds"])} s</b>
-    </div>
-  </div>
+    # bucket por segundo
+    d = df.dropna(subset=["ts"]).copy()
+    d["sec"] = d["ts"].dt.floor("S")
+    g = d.groupby("sec")["elapsed"].median().reset_index()
 
-  <div class="row">
-    <div class="card kpi grid-4"><div class="k">Muestras</div><div class="v">{kpis["samples"]:,}</div></div>
-    <div class="card kpi grid-4"><div class="k">Throughput</div><div class="v">{fmt_num(kpis["throughput_rps"])} rps</div></div>
-    <div class="card kpi grid-4"><div class="k">Error Rate</div><div class="v">{fmt_pct(kpis["error_rate"])}</div></div>
+    plt.figure()
+    plt.plot(g["sec"], g["elapsed"])
+    plt.title("Mediana de tiempo de respuesta (ms) por segundo")
+    plt.xlabel("Tiempo")
+    plt.ylabel("ms")
+    plt.xticks(rotation=25, ha="right")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160)
+    plt.close()
+    return True
 
-    <div class="card kpi grid-3"><div class="k">Promedio</div><div class="v">{fmt_ms(kpis["avg_ms"])}</div></div>
-    <div class="card kpi grid-3"><div class="k">p90</div><div class="v">{fmt_ms(kpis["p90_ms"])}</div></div>
-    <div class="card kpi grid-3"><div class="k">p95</div><div class="v">{fmt_ms(kpis["p95_ms"])}</div></div>
-    <div class="card kpi grid-3"><div class="k">p99</div><div class="v">{fmt_ms(kpis["p99_ms"])}</div></div>
-  </div>
 
-  <div class="row">
-    <div class="card grid-12">
-      <h2>Top 10 transacciones más lentas (por p95)</h2>
-      <table>
-        <tr><th>Transacción</th><th>Muestras</th><th>Errores</th><th>Error rate</th><th>p95</th><th>p99</th></tr>
-"""
-    for r in top_slow:
-        html += f"""<tr>
-<td>{r["label"]}</td>
-<td>{int(r["samples"])}</td>
-<td>{int(r["errors"])}</td>
-<td>{fmt_pct(r["error_rate"])}</td>
-<td>{fmt_ms(r["p95_ms"])}</td>
-<td>{fmt_ms(r["p99_ms"])}</td>
-</tr>"""
-    html += """
-      </table>
-    </div>
-  </div>
+def save_plot_hist(df: pd.DataFrame, out_png: str):
+    plt.figure()
+    plt.hist(df["elapsed"].values, bins=30)
+    plt.title("Distribución de tiempos de respuesta (ms)")
+    plt.xlabel("ms")
+    plt.ylabel("Frecuencia")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160)
+    plt.close()
+    return True
 
-  <div class="row">
-    <div class="card grid-12">
-      <h2>Top errores</h2>
-"""
-    if top_errors:
-        html += "<table><tr><th>Firma</th><th>Conteo</th><th>% del total</th></tr>"
-        for e in top_errors:
-            html += f"""<tr>
-<td class="mono">{e["signature"]}</td>
-<td>{e["count"]}</td>
-<td>{fmt_pct(e["pct"])}</td>
-</tr>"""
-        html += "</table>"
+
+def save_plot_top_slowest(slowest_df: pd.DataFrame, out_png: str):
+    if slowest_df.empty:
+        return False
+    plt.figure()
+    plt.bar(slowest_df["label"].astype(str).values, slowest_df["p95"].values)
+    plt.title("Top transacciones más lentas (p95 ms)")
+    plt.xlabel("Transacción")
+    plt.ylabel("p95 (ms)")
+    plt.xticks(rotation=20, ha="right")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=160)
+    plt.close()
+    return True
+
+
+def fmt_ms(x):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    return f"{x:.0f} ms"
+
+
+def fmt_num(x, nd=2):
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "-"
+    return f"{x:.{nd}f}"
+
+
+def build_pdf(out_pdf: str, kpis: dict, slowest: pd.DataFrame, errors: pd.DataFrame, charts: list[str]):
+    doc = SimpleDocTemplate(out_pdf, pagesize=A4,
+                            leftMargin=1.6*cm, rightMargin=1.6*cm,
+                            topMargin=1.6*cm, bottomMargin=1.6*cm)
+
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], spaceAfter=8)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], spaceBefore=12, spaceAfter=6)
+    normal = styles["BodyText"]
+
+    story = []
+
+    # PORTADA
+    story.append(Paragraph("Reporte de Pruebas de Performance", h1))
+    story.append(Spacer(1, 6))
+
+    meta = [
+        ["Generado", kpis["generated_at"]],
+        ["Ventana", f'{kpis["start"]} → {kpis["end"]}'],
+        ["Duración", f'{fmt_num(kpis["duration_s"], 2)} s'],
+    ]
+    t = Table(meta, colWidths=[4*cm, 12*cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 12))
+
+    # KPI “cards”
+    story.append(Paragraph("KPIs", h2))
+    kpi_table = [
+        ["Muestras", str(kpis["samples"]), "Throughput", f'{fmt_num(kpis["throughput_rps"], 2)} rps'],
+        ["Errores", str(kpis["errors"]), "Error rate", f'{fmt_num(kpis["error_rate"], 2)} %'],
+        ["Promedio", fmt_ms(kpis["avg_ms"]), "p90", fmt_ms(kpis["p90_ms"])],
+        ["p95", fmt_ms(kpis["p95_ms"]), "p99", fmt_ms(kpis["p99_ms"])],
+        ["Min", fmt_ms(kpis["min_ms"]), "Max", fmt_ms(kpis["max_ms"])],
+    ]
+    kt = Table(kpi_table, colWidths=[3.4*cm, 4.6*cm, 3.4*cm, 4.6*cm])
+    kt.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.append(kt)
+
+    # GRÁFICOS
+    if charts:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("Gráficos", h2))
+        for c in charts:
+            if os.path.exists(c):
+                story.append(Image(c, width=16.5*cm, height=9.0*cm))
+                story.append(Spacer(1, 8))
+
+    # TABLAS
+    story.append(PageBreak())
+    story.append(Paragraph("Top 10 transacciones más lentas (por p95)", h2))
+
+    if not slowest.empty:
+        data = [["Transacción", "Muestras", "Errores", "Error rate", "Avg", "p95", "p99"]]
+        for _, r in slowest.iterrows():
+            data.append([
+                str(r["label"]),
+                str(int(r["samples"])),
+                str(int(r["errors"])),
+                f'{r["error_rate"]:.2f}%',
+                fmt_ms(r["avg"]),
+                fmt_ms(r["p95"]),
+                fmt_ms(r["p99"]),
+            ])
+        tt = Table(data, colWidths=[5.5*cm, 2.2*cm, 2.0*cm, 2.3*cm, 2.0*cm, 2.0*cm, 2.0*cm])
+        tt.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE", (0,0), (-1,-1), 9),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ]))
+        story.append(tt)
     else:
-        html += '<div class="sub">No se registraron errores (success=true en todas las muestras).</div>'
+        story.append(Paragraph("No hay datos para mostrar.", normal))
 
-    html += """
-    </div>
-  </div>
-
-</div>
-</body>
-</html>
-"""
-    html_path.write_text(html, encoding="utf-8")
-    return html_path
-
-
-def build_pdf(out_dir: Path, kpis: dict, txn_df: pd.DataFrame, top_errors: list):
-    pdf_path = out_dir / "performance_report_custom.pdf"
-
-    top_slow = txn_df.head(5).to_dict(orient="records")
-
-    c = canvas.Canvas(str(pdf_path), pagesize=letter)
-    width, height = letter
-
-    def title(y, text):
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(0.8 * inch, y, text)
-        return y - 0.35 * inch
-
-    def kv(y, k, v):
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(0.8 * inch, y, k)
-        c.setFont("Helvetica", 10)
-        c.drawString(2.8 * inch, y, v)
-        return y - 0.22 * inch
-
-    y = height - 0.8 * inch
-    y = title(y, "Reporte de Pruebas de Performance")
-    c.setFont("Helvetica", 10)
-    c.drawString(0.8 * inch, y, f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y -= 0.25 * inch
-
-    y = title(y, "Resumen (KPIs)")
-    y = kv(y, "Muestras", f"{kpis['samples']:,}")
-    y = kv(y, "Throughput", f"{kpis['throughput_rps']:.2f} rps")
-    y = kv(y, "Error rate", f"{kpis['error_rate']*100:.2f}%")
-    y = kv(y, "Avg", f"{kpis['avg_ms']:.0f} ms")
-    y = kv(y, "p95", f"{kpis['p95_ms']:.0f} ms")
-    y = kv(y, "p99", f"{kpis['p99_ms']:.0f} ms")
-    y -= 0.15 * inch
-
-    y = title(y, "Top 5 transacciones más lentas (p95)")
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(0.8 * inch, y, "Transacción")
-    c.drawString(3.6 * inch, y, "p95")
-    c.drawString(4.4 * inch, y, "p99")
-    c.drawString(5.2 * inch, y, "Err%")
-    y -= 0.18 * inch
-
-    c.setFont("Helvetica", 9)
-    for r in top_slow:
-        c.drawString(0.8 * inch, y, str(r["label"])[:45])
-        c.drawRightString(4.2 * inch, y, f"{r['p95_ms']:.0f} ms")
-        c.drawRightString(5.0 * inch, y, f"{r['p99_ms']:.0f} ms")
-        c.drawRightString(6.6 * inch, y, f"{r['error_rate']*100:.2f}%")
-        y -= 0.18 * inch
-        if y < 1.2 * inch:
-            c.showPage()
-            y = height - 0.8 * inch
-            c.setFont("Helvetica", 9)
-
-    y -= 0.15 * inch
-    y = title(y, "Top errores")
-    c.setFont("Helvetica", 9)
-    if top_errors:
-        for e in top_errors[:5]:
-            line = f"{e['signature']}  (x{e['count']}, {e['pct']*100:.2f}%)"
-            max_chars = 95
-            for i in range(0, len(line), max_chars):
-                c.drawString(0.8 * inch, y, line[i:i + max_chars])
-                y -= 0.16 * inch
-                if y < 1.0 * inch:
-                    c.showPage()
-                    y = height - 0.8 * inch
-                    c.setFont("Helvetica", 9)
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("Top errores", h2))
+    if errors.empty:
+        story.append(Paragraph("No se registraron errores.", normal))
     else:
-        c.drawString(0.8 * inch, y, "No se registraron errores.")
-        y -= 0.2 * inch
+        data = [["Transacción", "Código", "Mensaje", "Cantidad"]]
+        for _, r in errors.iterrows():
+            msg = (r["responseMessage"] or "")[:80]
+            data.append([str(r["label"]), str(r["responseCode"]), msg, str(int(r["count"]))])
+        et = Table(data, colWidths=[5.0*cm, 2.0*cm, 7.0*cm, 2.0*cm])
+        et.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        story.append(et)
 
-    c.save()
-    return pdf_path
+    # CONCLUSIONES Y RECOMENDACIONES (AUTO)
+    story.append(PageBreak())
+    story.append(Paragraph("Conclusiones y Recomendaciones", h2))
+
+    conclusions = []
+    if kpis["error_rate"] >= 1.0:
+        conclusions.append(f"- Se detecta **{kpis['error_rate']:.2f}%** de errores. Revisar estabilidad y códigos de respuesta.")
+    else:
+        conclusions.append(f"- Error rate **{kpis['error_rate']:.2f}%** (ok).")
+
+    if not np.isnan(kpis["p95_ms"]) and kpis["p95_ms"] > 800:
+        conclusions.append(f"- p95 = **{kpis['p95_ms']:.0f} ms** (alto). Posible cuello de botella en backend o DB.")
+    else:
+        conclusions.append(f"- p95 = **{kpis['p95_ms']:.0f} ms** (dentro de lo esperado).")
+
+    if not np.isnan(kpis["throughput_rps"]) and kpis["throughput_rps"] < 1:
+        conclusions.append(f"- Throughput bajo (**{kpis['throughput_rps']:.2f} rps**). Validar ramp-up, timers y capacidad.")
+    else:
+        conclusions.append(f"- Throughput = **{kpis['throughput_rps']:.2f} rps**.")
+
+    story.append(Paragraph("<br/>".join(conclusions), normal))
+    story.append(Spacer(1, 10))
+
+    story.append(Paragraph(
+        "Recomendaciones sugeridas:<br/>"
+        "- Definir SLA/SLI (p95, error rate) por endpoint y validar contra baseline.<br/>"
+        "- Ejecutar 3 corridas y comparar variación (consistencia).<br/>"
+        "- Correlacionar con métricas del servidor (CPU, memoria, DB, GC).<br/>"
+        "- Separar escenarios: smoke (rápido), carga (estable), stress (límite).",
+        normal
+    ))
+
+    doc.build(story)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Genera reporte HTML+PDF personalizado desde un results.jtl de JMeter.")
-    ap.add_argument("--jtl", required=True, help="Ruta al results.jtl (CSV) generado por JMeter")
-    ap.add_argument("--out", required=True, help="Directorio de salida (ej: target)")
-    ap.add_argument("--export-csv", action="store_true", help="Exporta transactions_metrics.csv y errors_top.csv")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--jtl", required=True)
+    ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    jtl_path = Path(args.jtl).resolve()
-    out_dir = Path(args.out).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(args.out, exist_ok=True)
 
-    if not jtl_path.exists():
-        raise SystemExit(f"No existe el JTL: {jtl_path}")
+    df = read_jtl(args.jtl)
+    kpis = build_kpis(df)
+    slow = top_slowest(df, 10)
+    err = top_errors(df, 10)
 
-    df = parse_jtl(jtl_path)
-    kpis, txn_df, top_errors = compute_metrics(df)
+    # Guardar KPIs en json (útil para Jenkins/IA después)
+    kpis_path = os.path.join(args.out, "kpis.json")
+    with open(kpis_path, "w", encoding="utf-8") as f:
+        json.dump(kpis, f, ensure_ascii=False, indent=2)
 
-    # JSON auxiliar de KPIs (útil para CI)
-    (out_dir / "kpis.json").write_text(json.dumps(to_native(kpis), indent=2), encoding="utf-8")
+    # Charts
+    charts = []
+    p1 = os.path.join(args.out, "chart_timeline.png")
+    if save_plot_timeline(df, p1):
+        charts.append(p1)
+    p2 = os.path.join(args.out, "chart_hist.png")
+    save_plot_hist(df, p2); charts.append(p2)
+    p3 = os.path.join(args.out, "chart_top_slowest.png")
+    if save_plot_top_slowest(slow, p3):
+        charts.append(p3)
 
-    html_path = build_custom_html(out_dir, kpis, txn_df, top_errors)
-    pdf_path = build_pdf(out_dir, kpis, txn_df, top_errors)
+    out_html = os.path.join(args.out, "performance_report_custom.html")
+    out_pdf  = os.path.join(args.out, "performance_report_custom.pdf")
 
-    if args.export_csv:
-        txn_df.to_csv(out_dir / "transactions_metrics.csv", index=False)
-        pd.DataFrame(top_errors).to_csv(out_dir / "errors_top.csv", index=False)
+    # HTML simple (si ya tienes uno mejor, déjalo; aquí solo mantenemos compatibilidad)
+    with open(out_html, "w", encoding="utf-8") as f:
+        f.write(f"""<!doctype html><html><head><meta charset="utf-8"><title>Reporte</title></head>
+<body>
+<h1>Reporte de Pruebas de Performance</h1>
+<p><b>Generado:</b> {kpis["generated_at"]}</p>
+<ul>
+<li>Muestras: {kpis["samples"]}</li>
+<li>Throughput: {kpis["throughput_rps"]:.2f} rps</li>
+<li>Error rate: {kpis["error_rate"]:.2f}%</li>
+<li>Avg: {kpis["avg_ms"]:.0f} ms</li>
+<li>p95: {kpis["p95_ms"]:.0f} ms</li>
+<li>p99: {kpis["p99_ms"]:.0f} ms</li>
+</ul>
+</body></html>""")
+
+    build_pdf(out_pdf, kpis, slow, err, charts)
 
     print("OK")
-    print(f"HTML: {html_path}")
-    print(f"PDF : {pdf_path}")
-    print(f"KPIs: {out_dir / 'kpis.json'}")
+    print("HTML:", os.path.abspath(out_html))
+    print("PDF :", os.path.abspath(out_pdf))
+    print("KPIs:", os.path.abspath(kpis_path))
 
 
 if __name__ == "__main__":
