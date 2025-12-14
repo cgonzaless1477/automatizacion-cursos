@@ -94,7 +94,10 @@ pipeline {
                           exit /b 1
                         )
 
-                        "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
+                        "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target" ^
+  --job "%JOB_NAME%" --build "%BUILD_NUMBER%" --url "%BUILD_URL%" ^
+  --sla_p95 800 --sla_err 1
+
                         if %ERRORLEVEL% NEQ 0 (
                           echo ERROR: Fallo el script Python
                           exit /b 1
