@@ -19,11 +19,12 @@ pipeline {
         CUSTOM_HTML        = 'target\\performance_report_custom.html'
         CUSTOM_PDF         = 'target\\performance_report_custom.pdf'
 
-	PYTHON_EXE = 'C:\\Users\\intel\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
-
+        // Python (ruta absoluta porque Jenkins corre como servicio)
+        PYTHON_EXE         = 'C:\\Users\\intel\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
     }
 
     stages {
+
         stage('Verificar entorno') {
             steps {
                 dir('curso-performance-jmeter') {
@@ -70,44 +71,56 @@ pipeline {
             }
         }
 
-       stage('Generar reporte HTML y PDF personalizado') {
-    steps {
-        dir('curso-performance-jmeter') {
-            bat '''
-                echo ===== Generando reporte custom =====
+        stage('Generar reporte HTML y PDF personalizado') {
+            steps {
+                dir('curso-performance-jmeter') {
+                    bat '''
+                        echo ===== Generando reporte custom =====
 
-                "%PYTHON_EXE%" --version
-                if %ERRORLEVEL% NEQ 0 (
-                  echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
-                  exit /b 1
-                )
+                        "%PYTHON_EXE%" --version
+                        if %ERRORLEVEL% NEQ 0 (
+                          echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
+                          exit /b 1
+                        )
 
-                "%PYTHON_EXE%" -m pip --version
-                "%PYTHON_EXE%" -m pip install --user pandas numpy reportlab
+                        "%PYTHON_EXE%" -m pip --version
 
-                if not exist "scripts\\generate_custom_report.py" (
-                  echo ERROR: No existe scripts\\generate_custom_report.py
-                  exit /b 1
-                )
+                        REM Instalacion/upgrade (usa cache de pip, no molesta)
+                        "%PYTHON_EXE%" -m pip install --user --upgrade --no-warn-script-location pandas numpy reportlab
 
-                "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "target\\jmeter\\resultados.jtl" --out "target"
+                        if not exist "scripts\\generate_custom_report.py" (
+                          echo ERROR: No existe scripts\\generate_custom_report.py
+                          exit /b 1
+                        )
 
-                if not exist "target\\performance_report_custom.html" (
-                  echo ERROR: No se genero el HTML custom
-                  exit /b 1
-                )
+                        "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
 
-                if not exist "target\\performance_report_custom.pdf" (
-                  echo ERROR: No se genero el PDF custom
-                  exit /b 1
-                )
+                        if not exist "%CUSTOM_HTML%" (
+                          echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
+                          exit /b 1
+                        )
 
-                echo OK: Reporte custom generado
-            '''
+                        if not exist "%CUSTOM_PDF%" (
+                          echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
+                          exit /b 1
+                        )
+
+                        echo OK: Reporte custom generado
+                    '''
+                }
+
+                // Publicar HTML custom (requiere HTML Publisher Plugin)
+                publishHTML(target: [
+                    reportDir: 'curso-performance-jmeter/target',
+                    reportFiles: 'performance_report_custom.html',
+                    reportName: 'Performance Custom Report',
+                    keepAll: true,
+                    alwaysLinkToLastBuild: true,
+                    allowMissing: false
+                ])
+            }
         }
     }
-}
-}
 
     post {
         always {
