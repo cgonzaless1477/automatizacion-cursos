@@ -2,25 +2,17 @@ pipeline {
     agent any
 
     environment {
-        // Ruta donde está instalado JMeter en el servidor (Windows)
         JMETER_HOME        = 'C:\\apache-jmeter-5.6.3'
-
-        // Ruta al plan de pruebas, relativa a la carpeta curso-performance-jmeter
         JMETER_TEST_PLAN   = 'test\\escenario-principal.jmx'
-
-        // Carpeta donde guardaremos los resultados
         JMETER_RESULTS_DIR = 'target\\jmeter'
 
-        // Archivos clave
-        JMETER_JTL         = 'target\\jmeter\\resultados.jtl'
-        JMETER_REPORT_DIR  = 'target\\jmeter\\report'
+        JMETER_JTL        = 'target\\jmeter\\resultados.jtl'
+        JMETER_REPORT_DIR = 'target\\jmeter\\report'
 
-        // Outputs custom
-        CUSTOM_HTML        = 'target\\performance_report_custom.html'
-        CUSTOM_PDF         = 'target\\performance_report_custom.pdf'
+        CUSTOM_HTML = 'target\\performance_report_custom.html'
+        CUSTOM_PDF  = 'target\\performance_report_custom.pdf'
 
-        // Python (ruta absoluta porque Jenkins corre como servicio)
-        PYTHON_EXE         = 'C:\\Users\\intel\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
+        PYTHON_EXE = 'C:\\Users\\intel\\AppData\\Local\\Programs\\Python\\Python312\\python.exe'
     }
 
     stages {
@@ -58,79 +50,69 @@ pipeline {
                           exit /b 1
                         )
 
-                        echo ===== Ejecutando JMeter en modo no grafico =====
+                        echo ===== Ejecutando JMeter (non-GUI) =====
                         "%JMETER_HOME%\\bin\\jmeter.bat" -n ^
                           -t "%JMETER_TEST_PLAN%" ^
                           -l "%JMETER_JTL%" ^
                           -e -o "%JMETER_REPORT_DIR%"
 
                         echo ===== Codigo de salida JMeter: %ERRORLEVEL% =====
-                        exit /B %ERRORLEVEL%
+                        exit /b %ERRORLEVEL%
                     '''
                 }
             }
         }
 
-stage('Generar reporte HTML y PDF personalizado') {
-    steps {
-        dir('curso-performance-jmeter') {
-            bat '''
-                setlocal EnableExtensions
+        stage('Generar reporte HTML y PDF personalizado') {
+            steps {
+                dir('curso-performance-jmeter') {
+                    bat '''
+                        setlocal EnableExtensions
+                        echo ===== Generando reporte custom =====
 
-                echo ===== Generando reporte custom =====
+                        "%PYTHON_EXE%" --version
+                        if %ERRORLEVEL% NEQ 0 (
+                          echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
+                          exit /b 1
+                        )
 
-                "%PYTHON_EXE%" --version
-                if %ERRORLEVEL% NEQ 0 (
-                  echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
-                  exit /b 1
-                )
+                        "%PYTHON_EXE%" -m pip --version
+                        if %ERRORLEVEL% NEQ 0 (
+                          echo ERROR: pip no esta disponible
+                          exit /b 1
+                        )
 
-                "%PYTHON_EXE%" -m pip --version
-                if %ERRORLEVEL% NEQ 0 (
-                  echo ERROR: pip no esta disponible
-                  exit /b 1
-                )
+                        REM deps (incluye matplotlib)
+                        "%PYTHON_EXE%" -m pip install --user --upgrade --no-warn-script-location pandas numpy reportlab matplotlib
+                        if %ERRORLEVEL% NEQ 0 (
+                          echo ERROR: Fallo instalando dependencias Python
+                          exit /b 1
+                        )
 
-                REM Instalacion/upgrade deps (incluye matplotlib)
-                "%PYTHON_EXE%" -m pip install --user --upgrade --no-warn-script-location pandas numpy reportlab matplotlib
-                if %ERRORLEVEL% NEQ 0 (
-                  echo ERROR: Fallo instalando dependencias Python
-                  exit /b 1
-                )
+                        if not exist "scripts\\generate_custom_report.py" (
+                          echo ERROR: No existe scripts\\generate_custom_report.py
+                          exit /b 1
+                        )
 
-                if not exist "scripts\\generate_custom_report.py" (
-                  echo ERROR: No existe scripts\\generate_custom_report.py
-                  exit /b 1
-                )
+                        "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
+                        if %ERRORLEVEL% NEQ 0 (
+                          echo ERROR: Fallo el script Python
+                          exit /b 1
+                        )
 
-                "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
-                if %ERRORLEVEL% NEQ 0 (
-                  echo ERROR: Fallo al generar reporte custom (script Python)
-                  exit /b 1
-                )
+                        if not exist "%CUSTOM_HTML%" (
+                          echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
+                          exit /b 1
+                        )
 
-                if not exist "%CUSTOM_HTML%" (
-                  echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
-                  exit /b 1
-                )
+                        if not exist "%CUSTOM_PDF%" (
+                          echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
+                          exit /b 1
+                        )
 
-                if not exist "%CUSTOM_PDF%" (
-                  echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
-                  exit /b 1
-                )
-
-                echo OK: Reporte custom generado
-            '''
-
-                // Publicar HTML custom (requiere HTML Publisher Plugin)
-                publishHTML(target: [
-                    reportDir: 'curso-performance-jmeter/target',
-                    reportFiles: 'performance_report_custom.html',
-                    reportName: 'Performance Custom Report',
-                    keepAll: true,
-                    alwaysLinkToLastBuild: true,
-                    allowMissing: false
-                ])
+                        echo OK: Reporte custom generado
+                    '''
+                }
             }
         }
     }
@@ -139,15 +121,25 @@ stage('Generar reporte HTML y PDF personalizado') {
         always {
             dir('curso-performance-jmeter') {
 
+                // Publicar HTML custom (debe ir en post/steps, NO suelto)
+                publishHTML(target: [
+                    reportDir: 'target',
+                    reportFiles: 'performance_report_custom.html',
+                    reportName: 'Performance Custom Report',
+                    keepAll: true,
+                    alwaysLinkToLastBuild: true,
+                    allowMissing: false
+                ])
+
                 // Guardar artefactos: JMeter + custom
                 archiveArtifacts artifacts: 'target/**/*',
                                  fingerprint: true,
                                  allowEmptyArchive: true
 
-                // Publicar reporte de performance a partir del .jtl (plugin Performance)
+                // Plugin Performance
                 perfReport(
-                    errorFailedThreshold: 10,      // FAIL si errores >= 10%
-                    errorUnstableThreshold: 1,     // UNSTABLE si errores >= 1%
+                    errorFailedThreshold: 10,
+                    errorUnstableThreshold: 1,
                     sourceDataFiles: 'target/jmeter/resultados.jtl'
                 )
             }
