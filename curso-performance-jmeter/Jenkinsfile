@@ -2,12 +2,22 @@ pipeline {
     agent any
 
     environment {
-        // Ruta donde está instalado JMeter en el servidor
-        JMETER_HOME        = 'C:/apache-jmeter-5.6.3'
+        // Ruta donde está instalado JMeter en el servidor (Windows)
+        JMETER_HOME        = 'C:\\apache-jmeter-5.6.3'
+
         // Ruta al plan de pruebas, relativa a la carpeta curso-performance-jmeter
-        JMETER_TEST_PLAN   = 'test/escenario-principal.jmx'
+        JMETER_TEST_PLAN   = 'test\\escenario-principal.jmx'
+
         // Carpeta donde guardaremos los resultados
-        JMETER_RESULTS_DIR = 'target/jmeter'
+        JMETER_RESULTS_DIR = 'target\\jmeter'
+
+        // Archivos clave
+        JMETER_JTL         = 'target\\jmeter\\resultados.jtl'
+        JMETER_REPORT_DIR  = 'target\\jmeter\\report'
+
+        // Outputs custom
+        CUSTOM_HTML        = 'target\\performance_report_custom.html'
+        CUSTOM_PDF         = 'target\\performance_report_custom.pdf'
     }
 
     stages {
@@ -16,7 +26,7 @@ pipeline {
                 dir('curso-performance-jmeter') {
                     bat '''
                         echo ===== Verificando JMeter =====
-                        "C:/apache-jmeter-5.6.3/bin/jmeter.bat" -v
+                        "%JMETER_HOME%\\bin\\jmeter.bat" -v
                     '''
                 }
             }
@@ -25,28 +35,69 @@ pipeline {
         stage('Ejecutar pruebas de performance') {
             steps {
                 dir('curso-performance-jmeter') {
-                    bat """
+                    bat '''
                         echo ===== Carpeta actual =====
                         cd
 
+                        REM Crear carpeta base de resultados si no existe
+                        if not exist "%JMETER_RESULTS_DIR%" mkdir "%JMETER_RESULTS_DIR%"
+
                         REM Borrar reporte anterior si existe
-                        if exist \"%JMETER_RESULTS_DIR%\\report\" rmdir /s /q \"%JMETER_RESULTS_DIR%\\report\"
+                        if exist "%JMETER_REPORT_DIR%" rmdir /s /q "%JMETER_REPORT_DIR%"
 
                         REM Borrar archivo de resultados anterior si existe
-                        if exist \"%JMETER_RESULTS_DIR%\\resultados.jtl\" del /q \"%JMETER_RESULTS_DIR%\\resultados.jtl\"
+                        if exist "%JMETER_JTL%" del /f /q "%JMETER_JTL%"
 
-                        REM Crear carpeta base de resultados si no existe
-                        if not exist \"%JMETER_RESULTS_DIR%\" mkdir \"%JMETER_RESULTS_DIR%\"
+                        REM Validar que exista el test plan
+                        if not exist "%JMETER_TEST_PLAN%" (
+                          echo ERROR: No existe el JMX: %JMETER_TEST_PLAN%
+                          exit /b 1
+                        )
 
-                        REM Ejecutar JMeter en modo no gráfico
-                        \"%JMETER_HOME%/bin/jmeter.bat\" -n ^
-                          -t \"%JMETER_TEST_PLAN%\" ^
-                          -l \"%JMETER_RESULTS_DIR%/resultados.jtl\" ^
-                          -e -o \"%JMETER_RESULTS_DIR%/report\"
+                        echo ===== Ejecutando JMeter en modo no grafico =====
+                        "%JMETER_HOME%\\bin\\jmeter.bat" -n ^
+                          -t "%JMETER_TEST_PLAN%" ^
+                          -l "%JMETER_JTL%" ^
+                          -e -o "%JMETER_REPORT_DIR%"
 
-                        echo ===== Código de salida JMeter: %ERRORLEVEL% =====
+                        echo ===== Codigo de salida JMeter: %ERRORLEVEL% =====
                         exit /B %ERRORLEVEL%
-                    """
+                    '''
+                }
+            }
+        }
+
+        stage('Generar reporte HTML y PDF personalizado') {
+            steps {
+                dir('curso-performance-jmeter') {
+                    bat '''
+                        echo ===== Generando reporte custom =====
+                        python --version
+
+                        REM Instala deps (si ya estan, no pasa nada)
+                        pip install --user pandas numpy reportlab
+
+                        REM Ejecutar tu script (debe existir en scripts/)
+                        if not exist "scripts\\generate_custom_report.py" (
+                          echo ERROR: No existe scripts\\generate_custom_report.py
+                          exit /b 1
+                        )
+
+                        REM Genera HTML/PDF custom desde el JTL
+                        python scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
+
+                        if not exist "%CUSTOM_HTML%" (
+                          echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
+                          exit /b 1
+                        )
+
+                        if not exist "%CUSTOM_PDF%" (
+                          echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
+                          exit /b 1
+                        )
+
+                        echo OK: Reporte custom generado
+                    '''
                 }
             }
         }
@@ -55,12 +106,13 @@ pipeline {
     post {
         always {
             dir('curso-performance-jmeter') {
-                // Guardar artefactos de JMeter (.jtl + reporte HTML)
-                archiveArtifacts artifacts: 'target/jmeter/**/*',
+
+                // Guardar artefactos: JMeter + custom
+                archiveArtifacts artifacts: 'target/**/*',
                                  fingerprint: true,
                                  allowEmptyArchive: true
 
-                // Publicar reporte de performance a partir del .jtl
+                // Publicar reporte de performance a partir del .jtl (plugin Performance)
                 perfReport(
                     errorFailedThreshold: 10,      // FAIL si errores >= 10%
                     errorUnstableThreshold: 1,     // UNSTABLE si errores >= 1%
