@@ -71,43 +71,56 @@ pipeline {
             }
         }
 
-        stage('Generar reporte HTML y PDF personalizado') {
-            steps {
-                dir('curso-performance-jmeter') {
-                    bat '''
-                        echo ===== Generando reporte custom =====
+stage('Generar reporte HTML y PDF personalizado') {
+    steps {
+        dir('curso-performance-jmeter') {
+            bat '''
+                setlocal EnableExtensions
 
-                        "%PYTHON_EXE%" --version
-                        if %ERRORLEVEL% NEQ 0 (
-                          echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
-                          exit /b 1
-                        )
+                echo ===== Generando reporte custom =====
 
-                        "%PYTHON_EXE%" -m pip --version
+                "%PYTHON_EXE%" --version
+                if %ERRORLEVEL% NEQ 0 (
+                  echo ERROR: No se pudo ejecutar Python en %PYTHON_EXE%
+                  exit /b 1
+                )
 
-                        REM Instalacion/upgrade (usa cache de pip, no molesta)
-                        "%PYTHON_EXE%" -m pip install --user --upgrade --no-warn-script-location pandas numpy reportlab
+                "%PYTHON_EXE%" -m pip --version
+                if %ERRORLEVEL% NEQ 0 (
+                  echo ERROR: pip no esta disponible
+                  exit /b 1
+                )
 
-                        if not exist "scripts\\generate_custom_report.py" (
-                          echo ERROR: No existe scripts\\generate_custom_report.py
-                          exit /b 1
-                        )
+                REM Instalacion/upgrade deps (incluye matplotlib)
+                "%PYTHON_EXE%" -m pip install --user --upgrade --no-warn-script-location pandas numpy reportlab matplotlib
+                if %ERRORLEVEL% NEQ 0 (
+                  echo ERROR: Fallo instalando dependencias Python
+                  exit /b 1
+                )
 
-                        "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
+                if not exist "scripts\\generate_custom_report.py" (
+                  echo ERROR: No existe scripts\\generate_custom_report.py
+                  exit /b 1
+                )
 
-                        if not exist "%CUSTOM_HTML%" (
-                          echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
-                          exit /b 1
-                        )
+                "%PYTHON_EXE%" scripts\\generate_custom_report.py --jtl "%JMETER_JTL%" --out "target"
+                if %ERRORLEVEL% NEQ 0 (
+                  echo ERROR: Fallo al generar reporte custom (script Python)
+                  exit /b 1
+                )
 
-                        if not exist "%CUSTOM_PDF%" (
-                          echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
-                          exit /b 1
-                        )
+                if not exist "%CUSTOM_HTML%" (
+                  echo ERROR: No se genero el HTML custom: %CUSTOM_HTML%
+                  exit /b 1
+                )
 
-                        echo OK: Reporte custom generado
-                    '''
-                }
+                if not exist "%CUSTOM_PDF%" (
+                  echo ERROR: No se genero el PDF custom: %CUSTOM_PDF%
+                  exit /b 1
+                )
+
+                echo OK: Reporte custom generado
+            '''
 
                 // Publicar HTML custom (requiere HTML Publisher Plugin)
                 publishHTML(target: [
